@@ -1,14 +1,21 @@
+import { type RawSourceMap } from 'source-map-js'
+
 import { version } from '../package.json'
 import { WalkAction, comment, decl, rule, toCss, walk, type AstNode, type Rule } from './ast'
 import { compileCandidates } from './compile'
 import * as CSS from './css-parser'
 import { buildDesignSystem } from './design-system'
+import { toSourceMap } from './source-map'
 import { Theme } from './theme'
 
-export function compile(css: string): {
+export function compile(
+  css: string,
+  { map: shouldGenerateMap }: { map?: boolean } = {},
+): {
   build(candidates: string[]): string
+  buildSourceMap(): RawSourceMap
 } {
-  let ast = CSS.parse(css)
+  let ast = CSS.parse(css, { trackSource: shouldGenerateMap })
 
   if (process.env.NODE_ENV !== 'test') {
     ast.unshift(comment(`! tailwindcss v${version} | MIT License | https://tailwindcss.com `))
@@ -97,7 +104,7 @@ export function compile(css: string): {
 
     for (let [key, value] of theme.entries()) {
       if (value.isReference) continue
-      nodes.push(decl(key, value.value))
+      nodes.push(decl(key, value.value, firstThemeRule.source))
     }
 
     if (keyframesRules.length > 0) {
@@ -117,7 +124,7 @@ export function compile(css: string): {
         nodes.push(
           Object.assign(keyframesRule, {
             selector: '@at-root',
-            nodes: [rule(keyframesRule.selector, keyframesRule.nodes)],
+            nodes: [rule(keyframesRule.selector, keyframesRule.nodes, keyframesRule.source)],
           }),
         )
       }
@@ -174,6 +181,10 @@ export function compile(css: string): {
             }
           }
 
+          walk(newNodes, (child) => {
+            child.source = node.source
+          })
+
           replaceWith(newNodes)
         }
       }
@@ -184,7 +195,7 @@ export function compile(css: string): {
   // resulted in a generated AST Node. All the other `rawCandidates` are invalid
   // and should be ignored.
   let allValidCandidates = new Set<string>()
-  let compiledCss = toCss(ast)
+  let compiledCss = toCss(ast, { trackDestination: shouldGenerateMap })
   let previousAstNodeCount = 0
 
   return {
@@ -211,6 +222,11 @@ export function compile(css: string): {
           onInvalidCandidate,
         }).astNodes
 
+        walk(newNodes, (node) => {
+          if (node.source.length) return
+          node.source = tailwindUtilitiesNode!.source
+        })
+
         // If no new ast nodes were generated, then we can return the original
         // CSS. This currently assumes that we only add new ast nodes and never
         // remove any.
@@ -221,10 +237,17 @@ export function compile(css: string): {
         previousAstNodeCount = newNodes.length
 
         tailwindUtilitiesNode.nodes = newNodes
-        compiledCss = toCss(ast)
+        compiledCss = toCss(ast, { trackDestination: shouldGenerateMap })
       }
 
       return compiledCss
+    },
+    buildSourceMap() {
+      if (!shouldGenerateMap) {
+        throw new Error('buildSourceMap called without passing a source map to compile')
+      }
+
+      return toSourceMap(css, ast)!
     },
   }
 }

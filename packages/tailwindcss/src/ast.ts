@@ -1,7 +1,19 @@
+export type Location = {
+  line: number
+  column: number
+}
+
+export type Range = {
+  start: Location
+  end: Location
+}
+
 export type Rule = {
   kind: 'rule'
   selector: string
   nodes: AstNode[]
+  source: Range[]
+  destination: Range[]
 }
 
 export type Declaration = {
@@ -9,36 +21,46 @@ export type Declaration = {
   property: string
   value: string
   important: boolean
+  source: Range[]
+  destination: Range[]
 }
 
 export type Comment = {
   kind: 'comment'
   value: string
+  source: Range[]
+  destination: Range[]
 }
 
 export type AstNode = Rule | Declaration | Comment
 
-export function rule(selector: string, nodes: AstNode[]): Rule {
+export function rule(selector: string, nodes: AstNode[], source: Range[] = []): Rule {
   return {
     kind: 'rule',
     selector,
     nodes,
+    source,
+    destination: [],
   }
 }
 
-export function decl(property: string, value: string): Declaration {
+export function decl(property: string, value: string, source: Range[] = []): Declaration {
   return {
     kind: 'declaration',
     property,
     value,
     important: false,
+    source,
+    destination: [],
   }
 }
 
-export function comment(value: string): Comment {
+export function comment(value: string, source: Range[] = []): Comment {
   return {
     kind: 'comment',
     value: value,
+    source,
+    destination: [],
   }
 }
 
@@ -87,29 +109,37 @@ export function walk(
   }
 }
 
-export function toCss(ast: AstNode[]) {
-  let atRoots: string = ''
+export function toCss(ast: AstNode[], { trackDestination }: { trackDestination?: boolean } = {}) {
+  let atRoots: AstNode[] = []
   let seenAtProperties = new Set<string>()
 
-  function stringify(node: AstNode, depth = 0): string {
+  function stringifyAll(
+    nodes: AstNode[],
+    { depth, location }: { depth: number; location?: Location },
+  ): string {
     let css = ''
+    for (let child of nodes) {
+      css += stringify(child, { depth, location })
+    }
+    return css
+  }
+
+  function stringify(
+    node: AstNode,
+    { depth, location }: { depth: number; location?: Location },
+  ): string {
     let indent = '  '.repeat(depth)
 
     // Rule
     if (node.kind === 'rule') {
       // Pull out `@at-root` rules to append later
       if (node.selector === '@at-root') {
-        for (let child of node.nodes) {
-          atRoots += stringify(child, 0)
-        }
-        return css
+        atRoots = atRoots.concat(node.nodes)
+        return ''
       }
 
       if (node.selector === '@tailwind utilities') {
-        for (let child of node.nodes) {
-          css += stringify(child, depth)
-        }
-        return css
+        return stringifyAll(node.nodes, { depth, location })
       }
 
       // Print at-rules without nodes with a `;` instead of an empty block.
@@ -120,6 +150,15 @@ export function toCss(ast: AstNode[]) {
       // @layer base, components, utilities;
       // ```
       if (node.selector[0] === '@' && node.nodes.length === 0) {
+        node.destination = location
+          ? [
+              {
+                start: { line: location.line, column: indent.length },
+                end: { line: location.line, column: indent.length },
+              },
+            ]
+          : []
+        if (location) location.line += 1
         return `${indent}${node.selector};\n`
       }
 
@@ -132,33 +171,56 @@ export function toCss(ast: AstNode[]) {
         seenAtProperties.add(node.selector)
       }
 
-      css += `${indent}${node.selector} {\n`
-      for (let child of node.nodes) {
-        css += stringify(child, depth + 1)
+      let css = `${indent}${node.selector} {\n`
+      if (location) {
+        node.destination = [
+          {
+            start: { line: location.line, column: indent.length },
+            end: { line: location.line, column: indent.length },
+          },
+        ]
+        location.line += 1
       }
+      css += stringifyAll(node.nodes, { depth: depth + 1, location })
       css += `${indent}}\n`
+      if (location) location.line += 1
+      return css
     }
 
     // Comment
     else if (node.kind === 'comment') {
-      css += `${indent}/*${node.value}*/\n`
+      if (location) {
+        node.destination = [
+          {
+            start: { line: location.line, column: indent.length },
+            end: { line: location.line, column: indent.length },
+          },
+        ]
+        location.line += 1 + node.value.split('\n').length - 1
+      }
+      return `${indent}/*${node.value}*/\n`
     }
 
     // Declaration
     else if (node.property !== '--tw-sort' && node.value !== undefined && node.value !== null) {
-      css += `${indent}${node.property}: ${node.value}${node.important ? '!important' : ''};\n`
+      if (location) {
+        node.destination = [
+          {
+            start: { line: location.line, column: indent.length },
+            end: { line: location.line, column: indent.length },
+          },
+        ]
+        location.line += 1 + node.value.split('\n').length - 1
+      }
+      return `${indent}${node.property}: ${node.value}${node.important ? '!important' : ''};\n`
     }
 
-    return css
+    return ''
   }
 
-  let css = ''
-  for (let node of ast) {
-    let result = stringify(node)
-    if (result !== '') {
-      css += result
-    }
-  }
+  let location = trackDestination ? { line: 1, column: 0 } : undefined
+  let css = stringifyAll(ast, { depth: 0, location })
+  css += stringifyAll(atRoots, { depth: 0, location })
 
-  return `${css}${atRoots}`
+  return css
 }

@@ -1,6 +1,7 @@
 import { IO, Parsing, scanFiles } from '@tailwindcss/oxide'
 import { Features, transform } from 'lightningcss'
 import path from 'path'
+import { type SourceMap as RollupSourceMap } from 'rollup'
 import { compile } from 'tailwindcss'
 import type { Plugin, Rollup, Update, ViteDevServer } from 'vite'
 
@@ -72,12 +73,25 @@ export default function tailwindcss(): Plugin[] {
     return updated
   }
 
-  function generateCss(css: string) {
-    return compile(css).build(Array.from(candidates))
+  function generateCssWithMap(css: string, map: RollupSourceMap) {
+    let { build, buildSourceMap } = compile(css, {
+      // @ts-ignore: The types are wrong
+      map,
+    })
+
+    css = build(Array.from(candidates))
+
+    // @ts-ignore: The types are wrong
+    map = buildSourceMap()
+
+    return {
+      css,
+      map,
+    }
   }
 
   function generateOptimizedCss(css: string) {
-    return optimizeCss(generateCss(css), { minify })
+    return optimizeCss(compile(css).build(Array.from(candidates)), { minify }).css
   }
 
   // Manually run the transform functions of non-Tailwind plugins on the given CSS
@@ -189,8 +203,18 @@ export default function tailwindcss(): Plugin[] {
           await server?.waitForRequestsIdle?.(id)
         }
 
-        let code = await transformWithPlugins(this, id, generateCss(src))
-        return { code }
+        let inputMap = this.getCombinedSourcemap()
+
+        let { css, map } = generateCssWithMap(src, inputMap)
+
+        css = await transformWithPlugins(this, id, css)
+
+        return {
+          code: css,
+
+          // Rollup has incorrect types
+          map: map as any,
+        }
       },
     },
 
@@ -239,13 +263,18 @@ function isTailwindCssFile(id: string, src: string) {
 
 function optimizeCss(
   input: string,
-  { file = 'input.css', minify = false }: { file?: string; minify?: boolean } = {},
+  {
+    file = 'input.css',
+    minify = false,
+    map = null,
+  }: { file?: string; minify?: boolean; map?: any } = {},
 ) {
-  return transform({
+  let result = transform({
     filename: file,
     code: Buffer.from(input),
     minify,
-    sourceMap: false,
+    sourceMap: map ? true : false,
+    inputSourceMap: map ? JSON.stringify(map) : undefined,
     drafts: {
       customMedia: true,
     },
@@ -258,5 +287,10 @@ function optimizeCss(
       safari: (16 << 16) | (4 << 8),
     },
     errorRecovery: true,
-  }).code.toString()
+  })
+
+  return {
+    css: result.code.toString(),
+    map: result.map ? JSON.parse(result.map.toString()) : null,
+  }
 }

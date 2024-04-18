@@ -140,6 +140,8 @@ export function compileAstNodes(rawCandidate: string, designSystem: DesignSystem
     kind: 'rule',
     selector: `.${escape(rawCandidate)}`,
     nodes,
+    source: [],
+    destination: [],
   }
 
   for (let variant of candidate.variants) {
